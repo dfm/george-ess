@@ -30,11 +30,11 @@ class GP(_GP):
 
         # Change of variables for non-zero mean.
         mu = self.mean(self._x)
-        xx -= mu
+        xx = np.array(xx - mu)
 
         # Set up the ellipse and the slice threshold.
         D = len(xx)
-        nu = np.dot(self._factor[0], np.random.randn(D))
+        nu = np.dot(np.random.randn(D), self._factor[0])
         hh = ll0 + math.log(np.random.rand())
 
         # Set up a bracket of angles and pick a first proposal.
@@ -53,7 +53,7 @@ class GP(_GP):
         i = 0
         while True:
             xx_prop = xx * math.cos(phi) + nu * math.sin(phi)
-            cur_log_like = lnlike((xx_prop + mu)[self.inds])
+            cur_log_like = lnlike(xx_prop + mu)
             if cur_log_like > hh:
                 # New point is on slice.
                 break
@@ -84,20 +84,10 @@ class GP(_GP):
 
         return xx_prop + mu, cur_log_like
 
-    def _metropolis_step(self, w, step, update_mean):
-        if update_mean:
-            def setter(v):
-                self.mean.vector = v[:len(self.mean)]
-                self.kernel.vector = v[len(self.mean):]
-            getter = lambda: np.append(self.mean.vector, self.kernel.vector)
-        else:
-            def setter(v):
-                self.kernel.vector = v
-            getter = lambda: self.kernel.vector
-
+    def _metropolis_step(self, w, step, getter, setter):
         # Compute the initial vector and ln-likelihood.
         v0 = getter()
-        lp0 = self.lnlikelihood(w, quiet=True)
+        lp0 = self.lnlikelihood(w, quiet=True) + self.lnprior()
         if not np.isfinite(lp0):
             raise RuntimeError("The initial ln-likelihood in the Metropolis "
                                "step has zero probability.")
@@ -105,7 +95,7 @@ class GP(_GP):
         # Propose a new position and compute the updated ln-likelihood.
         q = v0 + step * np.random.randn(len(v0))
         setter(q)
-        lp1 = self.lnlikelihood(w, quiet=True)
+        lp1 = self.lnlikelihood(w, quiet=True) + self.lnprior()
 
         # Accept or reject the update.
         diff = lp1 - lp0
@@ -116,14 +106,52 @@ class GP(_GP):
         setter(v0)
         return v0, lp0, False
 
+    def lnprior(self):
+        return self.kernel.lnprior() + self.mean.lnprior()
+
     def elliptical_slice_sampling(self, lnlike, y=None, nstep=np.inf,
                                   angle_range=None, maxiter=np.inf,
-                                  hyper_update=0, update_mean=True, step=0.1):
+                                  hyper_update=0, update_mean=True,
+                                  stepsize=None):
+        # Check that a step size is given if required.
+        if hyper_update > 0 and stepsize is None:
+            raise ValueError("If you want to update the hyperparameters, you "
+                             "need to provide a step size")
+
         # If no initial guess is given, sample from the prior.
         if y is None:
             y = self.sample()
         y = y[self.inds]
         yret = np.empty_like(y)
+
+        # Set up the parameter space that we'll be sampling in and pre-compute
+        # some stuff.
+        if hyper_update > 0:
+            if update_mean:
+                def setter(v):
+                    self.mean.vector = v[:len(self.mean)]
+                    self.kernel.vector = v[len(self.mean):]
+                getter = lambda: np.append(self.mean.vector,
+                                           self.kernel.vector)
+            else:
+                def setter(v):
+                    self.kernel.vector = v
+                getter = lambda: self.kernel.vector
+
+            # Check the step size.
+            h = getter()
+            try:
+                len(stepsize)
+            except TypeError:
+                pass
+            else:
+                if len(stepsize) != len(h):
+                    raise ValueError("The step size must be a float or have "
+                                     "the same dimensions as the parameter "
+                                     "space ({0})".format(len(h)))
+
+            # Compute the initial ln-probability.
+            lp = self.lnlikelihood(y, quiet=True) + self.lnprior()
 
         # Define a new ln-likelihood function to deal with sample ordering.
         def _lnlike(y0):
@@ -144,8 +172,9 @@ class GP(_GP):
 
             # Update the hyperparameters using a Metropolis step if requested.
             if hyper_update > 0:
-                if step % hyper_update == 0:
-                    h, lp, a = self._metropolis_step(y, step, update_mean)
+                if (step + 1) % hyper_update == 0:
+                    h, lp, a = self._metropolis_step(np.array(yret), stepsize,
+                                                     getter, setter)
                     accepted += int(a)
                     total += 1
                 yield yret, h, ll + lp, accepted / total

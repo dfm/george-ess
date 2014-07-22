@@ -8,7 +8,17 @@ import math
 import logging
 import numpy as np
 
-from george import GP as _GP
+# Total hack to allow install without George installed.
+try:
+    __GEORGE_SETUP__
+except NameError:
+    __GEORGE_SETUP__ = False
+if __GEORGE_SETUP__:
+    _GP = object
+else:
+    from george import GP as _GP
+
+__version__ = "0.0.1"
 
 
 class GP(_GP):

@@ -53,7 +53,7 @@ class GP(_GP):
         i = 0
         while True:
             xx_prop = xx * math.cos(phi) + nu * math.sin(phi)
-            cur_log_like = lnlike(xx_prop + mu)
+            cur_log_like = lnlike((xx_prop + mu)[self.inds])
             if cur_log_like > hh:
                 # New point is on slice.
                 break
@@ -84,9 +84,19 @@ class GP(_GP):
 
         return xx_prop + mu, cur_log_like
 
-    def _metropolis_step(self, w, step):
+    def _metropolis_step(self, w, step, update_mean):
+        if update_mean:
+            def setter(v):
+                self.mean.vector = v[:len(self.mean)]
+                self.kernel.vector = v[len(self.mean):]
+            getter = lambda: np.append(self.mean.vector, self.kernel.vector)
+        else:
+            def setter(v):
+                self.kernel.vector = v
+            getter = lambda: self.kernel.vector
+
         # Compute the initial vector and ln-likelihood.
-        v0 = np.append(self.mean.vector, self.kernel.vector)
+        v0 = getter()
         lp0 = self.lnlikelihood(w, quiet=True)
         if not np.isfinite(lp0):
             raise RuntimeError("The initial ln-likelihood in the Metropolis "
@@ -94,8 +104,7 @@ class GP(_GP):
 
         # Propose a new position and compute the updated ln-likelihood.
         q = v0 + step * np.random.randn(len(v0))
-        self.mean.vector = q[:len(self.mean)]
-        self.kernel.vector = q[len(self.mean):]
+        setter(q)
         lp1 = self.lnlikelihood(w, quiet=True)
 
         # Accept or reject the update.
@@ -104,30 +113,44 @@ class GP(_GP):
             return q, lp1, True
 
         # The step was rejected, revert the parameters.
-        self.mean.vector = v0[:len(self.mean)]
-        self.kernel.vector = v0[len(self.mean):]
+        setter(v0)
         return v0, lp0, False
 
-    def elliptical_slice_sampling(self, lnlike, y, nstep=np.inf,
+    def elliptical_slice_sampling(self, lnlike, y=None, nstep=np.inf,
                                   angle_range=None, maxiter=np.inf,
-                                  hyper_update=0, step=0.1):
-        ll = lnlike(y)
+                                  hyper_update=0, update_mean=True, step=0.1):
+        # If no initial guess is given, sample from the prior.
+        if y is None:
+            y = self.sample()
+        y = y[self.inds]
+        yret = np.empty_like(y)
+
+        # Define a new ln-likelihood function to deal with sample ordering.
+        def _lnlike(y0):
+            yret[self.inds] = y0
+            return lnlike(yret)
+
+        # Compute the initial ln-likelihood.
+        ll = _lnlike(y)
+
+        # Run the ESS iterations.
         step = 0
         accepted, total = 1, 1
         while True:
             # Do an iteration of elliptical slice sampling.
-            y, ll = self._ess_step(lnlike, y, ll, angle_range=angle_range,
+            y, ll = self._ess_step(_lnlike, y, ll, angle_range=angle_range,
                                    maxiter=maxiter)
+            yret[self.inds] = y
 
             # Update the hyperparameters using a Metropolis step if requested.
             if hyper_update > 0:
                 if step % hyper_update == 0:
-                    h, lp, a = self._metropolis_step(y, step)
+                    h, lp, a = self._metropolis_step(y, step, update_mean)
                     accepted += int(a)
                     total += 1
-                yield y, h, ll + lp, accepted / total
+                yield yret, h, ll + lp, accepted / total
             else:
-                yield y, ll
+                yield yret, ll
 
             # Stopping criterion.
             step += 1

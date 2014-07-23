@@ -3,6 +3,11 @@
 import os
 import sys
 
+# Publish the library to PyPI.
+if "publish" in sys.argv[-1]:
+    os.system("python setup.py sdist upload")
+    sys.exit()
+
 try:
     from setuptools import setup
 except ImportError:
